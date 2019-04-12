@@ -13,6 +13,7 @@ import json
 INITIAL_MASK_LOWER_HSV = (0, 0, 0)
 INITIAL_MASK_UPPER_HSV = (179, 255, 20)
 INITIAL_MIN_BALL_RADIUS = 10
+INITIAL_MAX_BALL_RADIUS = 50
 INITIAL_MAX_FPS = 30
 CAMERA_RESOLUTION = (640, 480)
 MID_POINT = (int(CAMERA_RESOLUTION[0] / 2), int(CAMERA_RESOLUTION[1] / 2))
@@ -69,6 +70,7 @@ class Tracker:
             cv2.createTrackbar('Up S', CWIN, self.hsvUpper[1], 255, self.setUpperS)
             cv2.createTrackbar('Up V', CWIN, self.hsvUpper[2], 255, self.setUpperV)
             cv2.createTrackbar('Min R', CWIN, self.minRadius, 100, self.setMinRadius)
+            cv2.createTrackbar('Max R', CWIN, self.maxRadius, 100, self.setMaxRadius)
             cv2.createTrackbar('Max FPS (restart required)', CWIN, self.maxFps, 120, self.setMaxFps)
             cv2.createTrackbar('Save', CWIN, 0, 1, self.saveConfigFromUi)
             cv2.setMouseCallback(DWIN, self.setCorner)
@@ -124,12 +126,19 @@ class Tracker:
 
                 circle = None
                 center = None
-                if len(contours) > 0:
-                    largest = max(contours, key=cv2.contourArea)
-                    circle = cv2.minEnclosingCircle(largest)
-                    circle = ((int(circle[0][0]), int(circle[0][1])), int(circle[1]))
-                    if circle[1] > self.minRadius:
-                        #M = cv2.moments(largest)
+                for i in range(len(contours)):
+                    c = cv2.minEnclosingCircle(contours[i])
+                    if (
+                        (circle is None or c[1] > circle[1]) and
+                        c[1] >= self.minRadius and
+                        c[1] <= self.maxRadius and
+                        c[0][0] >= self.bound[0][0] and
+                        c[0][0] <= self.bound[1][0] and
+                        c[0][1] >= self.bound[0][1] and
+                        c[0][1] <= self.bound[1][1]
+                        ):
+                        circle = ((int(c[0][0]), int(c[0][1])), int(c[1]))
+                        #M = cv2.moments(contours[i])
                         #center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
                         center = circle[0]
                         self.posclient.sendPoint(self.applyTransform(center))
@@ -192,15 +201,17 @@ class Tracker:
         try:
             with open(CONFIG_FILE) as file:
                 data = json.load(file)
-            self.hsvLower = tuple(int(v) for v in data['hsvLower'])
-            self.hsvUpper = tuple(int(v) for v in data['hsvUpper'])
-            self.minRadius = int(data['minRadius'])
-            self.maxFps = int(data['maxFps'])
-            self.corners = list(tuple(int(v) for v in l) for l in data['corners'])
+            self.hsvLower = tuple(int(v) for v in data.get('hsvLower', ())) or INITIAL_MASK_LOWER_HSV
+            self.hsvUpper = tuple(int(v) for v in data.get('hsvUpper', ())) or INITIAL_MASK_UPPER_HSV
+            self.minRadius = int(data.get('minRadius', INITIAL_MIN_BALL_RADIUS))
+            self.maxRadius = int(data.get('maxRadius', INITIAL_MAX_BALL_RADIUS))
+            self.maxFps = int(data.get('maxFps', INITIAL_MAX_FPS))
+            self.corners = list(tuple(int(v) for v in l) for l in data.get('corners', ())) or INITIAL_CORNERS
         except:
             self.hsvLower = INITIAL_MASK_LOWER_HSV
             self.hsvUpper = INITIAL_MASK_UPPER_HSV
             self.minRadius = INITIAL_MIN_BALL_RADIUS
+            self.maxRadius = INITIAL_MAX_BALL_RADIUS
             self.maxFps = INITIAL_MAX_FPS
             self.corners = INITIAL_CORNERS
         self.updateTransform()
@@ -212,6 +223,7 @@ class Tracker:
                     'hsvLower': self.hsvLower,
                     'hsvUpper': self.hsvUpper,
                     'minRadius': self.minRadius,
+                    'maxRadius': self.maxRadius,
                     'maxFps': self.maxFps,
                     'corners': self.corners
                 }, file)
@@ -249,25 +261,36 @@ class Tracker:
     def setMinRadius(self, value):
         self.minRadius = value
 
+    def setMaxRadius(self, value):
+        self.maxRadius = value
+
     def setMaxFps(self, value):
         self.maxFps = value
 
     def setCorner(self, event, x, y, flags, parameters):
         if event == cv2.EVENT_LBUTTONUP:
+            center = (
+                sum(p[0] for p in self.corners) / 4,
+                sum(p[1] for p in self.corners) / 4
+            )
             p = (x, y)
-            if x < MID_POINT[0]:
-                if y < MID_POINT[1]:
+            if x < center[0]:
+                if y < center[1]:
                     self.corners[0] = p
                 else:
                     self.corners[3] = p
             else:
-                if y < MID_POINT[1]:
+                if y < center[1]:
                     self.corners[1] = p
                 else:
                     self.corners[2] = p
             self.updateTransform()
 
     def updateTransform(self):
+        self.bound = (
+            (min(p[0] for p in self.corners), min(p[1] for p in self.corners)),
+            (max(p[1] for p in self.corners), max(p[1] for p in self.corners))
+        )
         self.transform = cv2.getPerspectiveTransform(
             np.array(self.corners, dtype='float32'),
             np.array([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], dtype='float32')
