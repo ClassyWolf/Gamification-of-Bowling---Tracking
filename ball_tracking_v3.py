@@ -10,23 +10,11 @@ import socket
 import json
 
 
-INITIAL_MASK_LOWER_HSV = (0, 0, 0)
-INITIAL_MASK_UPPER_HSV = (179, 255, 20)
-INITIAL_MIN_BALL_RADIUS = 10
-INITIAL_MAX_BALL_RADIUS = 50
-INITIAL_MAX_FPS = 30
-CAMERA_RESOLUTION = (640, 480)
-MID_POINT = (int(CAMERA_RESOLUTION[0] / 2), int(CAMERA_RESOLUTION[1] / 2))
-INITIAL_CORNERS = [
-    (0, 0),
-    (CAMERA_RESOLUTION[0] - 1, 0),
-    (CAMERA_RESOLUTION[0] - 1, CAMERA_RESOLUTION[1] - 1),
-    (0, CAMERA_RESOLUTION[1] - 1)
-]
-DISPLAY_LINE_LEN = 64
+CONFIG_FILE = 'config.json'
+RESOLUTION = (320, 240)
+DISPLAY_LINE_LEN = 32
 DWIN = 'Tracking'
 CWIN = 'Calibrate'
-CONFIG_FILE = 'config.json'
 
 
 class PositionClient:
@@ -45,15 +33,118 @@ class PositionClient:
         return "{:f},{:f}".format(x, y).encode("UTF-8")
 
 
+class HSVColor:
+
+    @staticmethod
+    def read(src, h, s, v):
+        if src and len(src) == 3:
+            return HSVColor(*(int(v) for v in src))
+        return HSVColor(h, s, v)
+
+    def __init__(self, h, s, v):
+        self.vals = (h, s, v)
+
+    @property
+    def h(self):
+        return self.vals[0]
+
+    @property
+    def s(self):
+        return self.vals[1]
+
+    @property
+    def v(self):
+        return self.vals[2]
+
+    def setH(self, value):
+        return HSVColor(value, self.vals[1], self.vals[2])
+
+    def setS(self, value):
+        return HSVColor(self.vals[0], value, self.vals[2])
+
+    def setV(self, value):
+        return HSVColor(self.vals[0], self.vals[1], value)
+
+    def hsv(self):
+        return self.vals
+
+    def bgr(self):
+        l = cv2.cvtColor(np.uint8([[self.vals]]), cv2.COLOR_HSV2BGR).tolist()
+        return l[0][0]
+
+
+class Quadrangle:
+
+    @staticmethod
+    def read(src, tl, tr, br, bl):
+        mx = max(p[0] for p in (tl, tr, br, bl))
+        my = max(p[1] for p in (tl, tr, br, bl))
+        def readPoint(psrc, p):
+            if psrc and len(psrc) == 2:
+                return (max((0, min((mx, psrc[0])))), max((0, min((my, psrc[1])))))
+            return p
+        if src and len(src) == 4:
+            return Quadrangle(
+                readPoint(src[0], tl),
+                readPoint(src[1], tr),
+                readPoint(src[2], br),
+                readPoint(src[3], bl)
+            )
+        return Quadrangle(tl, tr, br, bl)
+
+    def __init__(self, topLeft, topRight, bottomRight, bottomLeft):
+        self.tl = topLeft
+        self.tr = topRight
+        self.br = bottomRight
+        self.bl = bottomLeft
+
+    def moveCorner(self, point):
+        center = self.center()
+        if point[0] < center[0]:
+            if point[1] < center[1]:
+                self.tl = point
+            else:
+                self.bl = point
+        else:
+            if point[1] < center[1]:
+                self.tr = point
+            else:
+                self.br = point
+
+    def center(self):
+        return (
+            sum(p[0] for p in self.points()) / 4,
+            sum(p[1] for p in self.points()) / 4
+        )
+
+    def points(self):
+        return (self.tl, self.tr, self.br, self.bl)
+
+    def lines(self, image, color):
+        cv2.polylines(
+            image,
+            [np.array(self.points(), dtype='int32')],
+            True,
+            color,
+            1
+        )
+
+    def fill(self, image, color):
+        cv2.fillPoly(
+            image,
+            [np.array(self.points(), dtype='int32')],
+            color
+        )
+
+
 class Tracker:
 
-    def __init__(self, videoFile, displayFlag, calibrateFlag, host, port):
-        self.videoFile = videoFile
-        self.videoFlag = bool(videoFile)
+    def __init__(self, displayFlag, calibrateFlag, host, port):
+        self.piCameraFlag = hasPiCamera()
         self.displayFlag = displayFlag or calibrateFlag
         self.calibrateFlag = calibrateFlag
         self.posclient = PositionClient(host, port)
-        self.loadConfig()
+        self.loadConfig(CONFIG_FILE, RESOLUTION)
         self.minFrameTime = 1.0 / self.maxFps
         self.line = deque(maxlen=DISPLAY_LINE_LEN)
         self.save = 0
@@ -63,12 +154,12 @@ class Tracker:
             cv2.namedWindow(DWIN)
         if self.calibrateFlag:
             cv2.namedWindow(CWIN)
-            cv2.createTrackbar('Low H', CWIN, self.hsvLower[0], 179, self.setLowerH)
-            cv2.createTrackbar('Low S', CWIN, self.hsvLower[1], 255, self.setLowerS)
-            cv2.createTrackbar('Low V', CWIN, self.hsvLower[2], 255, self.setLowerV)
-            cv2.createTrackbar('Up H', CWIN, self.hsvUpper[0], 179, self.setUpperH)
-            cv2.createTrackbar('Up S', CWIN, self.hsvUpper[1], 255, self.setUpperS)
-            cv2.createTrackbar('Up V', CWIN, self.hsvUpper[2], 255, self.setUpperV)
+            cv2.createTrackbar('Low H', CWIN, self.hsvLower.h, 179, self.setLowerH)
+            cv2.createTrackbar('Low S', CWIN, self.hsvLower.s, 255, self.setLowerS)
+            cv2.createTrackbar('Low V', CWIN, self.hsvLower.v, 255, self.setLowerV)
+            cv2.createTrackbar('Up H', CWIN, self.hsvUpper.h, 179, self.setUpperH)
+            cv2.createTrackbar('Up S', CWIN, self.hsvUpper.s, 255, self.setUpperS)
+            cv2.createTrackbar('Up V', CWIN, self.hsvUpper.v, 255, self.setUpperV)
             cv2.createTrackbar('Min R', CWIN, self.minRadius, 100, self.setMinRadius)
             cv2.createTrackbar('Max R', CWIN, self.maxRadius, 100, self.setMaxRadius)
             cv2.createTrackbar('Max FPS (restart required)', CWIN, self.maxFps, 120, self.setMaxFps)
@@ -76,24 +167,22 @@ class Tracker:
             cv2.setMouseCallback(DWIN, self.setCorner)
 
     def run(self):
-        if self.videoFlag:
-            vs = cv2.VideoCapture(self.videoFile)
-        else:
-            vs = VideoStream(
-                src=0,
-                usePiCamera=hasPiCamera(),
-                resolution=CAMERA_RESOLUTION,
-                framerate=self.maxFps
-            ).start()
+        vs = VideoStream(
+            src=0,
+            usePiCamera=self.piCameraFlag,
+            resolution=RESOLUTION,
+            framerate=self.maxFps
+        ).start()
 
-        crects = (
-            (MID_POINT[0] - 30, CAMERA_RESOLUTION[1] - 30),
-            (MID_POINT[0], CAMERA_RESOLUTION[1]),
-            (MID_POINT[0], CAMERA_RESOLUTION[1] - 30),
-            (MID_POINT[0] + 30, CAMERA_RESOLUTION[1])
+        midx = int(RESOLUTION[0] / 2)
+        colorRects = (
+            (midx - 30, RESOLUTION[1] - 30),
+            (midx, RESOLUTION[1]),
+            (midx, RESOLUTION[1] - 30),
+            (midx + 30, RESOLUTION[1])
         )
 
-        # Allow the camera or video file to warm up.
+        # Allow the camera to warm up
         time.sleep(2.0)
 
         try:
@@ -108,15 +197,12 @@ class Tracker:
                 lastTime += dif
 
                 frame = vs.read()
-                if self.videoFlag:
-                    frame = frame[1]
-                    if frame is None:
-                        break
-                    frame = imutils.resize(frame, width=CAMERA_RESOLUTION[0])
-
+                if not self.piCameraFlag:
+                    frame = cv2.resize(frame, RESOLUTION)
                 #frame = cv2.GaussianBlur(frame, (11, 11), 0)
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                mask = cv2.inRange(hsv, self.hsvLower, self.hsvUpper)
+                mask = cv2.inRange(hsv, self.hsvLower.hsv(), self.hsvUpper.hsv())
+                mask = cv2.bitwise_and(mask, mask, mask=self.cornersMask)
                 #mask = cv2.erode(mask, None, iterations=2)
                 #mask = cv2.dilate(mask, None, iterations=2)
                 contours = cv2.findContours(
@@ -130,13 +216,8 @@ class Tracker:
                     c = cv2.minEnclosingCircle(contours[i])
                     if (
                         (circle is None or c[1] > circle[1]) and
-                        c[1] >= self.minRadius and
-                        c[1] <= self.maxRadius and
-                        c[0][0] >= self.bound[0][0] and
-                        c[0][0] <= self.bound[1][0] and
-                        c[0][1] >= self.bound[0][1] and
-                        c[0][1] <= self.bound[1][1]
-                        ):
+                        c[1] >= self.minRadius and c[1] <= self.maxRadius
+                    ):
                         circle = ((int(c[0][0]), int(c[0][1])), int(c[1]))
                         #M = cv2.moments(contours[i])
                         #center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
@@ -166,19 +247,10 @@ class Tracker:
                             if self.save == 0:
                                 cv2.setTrackbarPos("Save", CWIN, 0)
                         gui = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-                        low = cv2.cvtColor(np.uint8([[self.hsvLower]]), cv2.COLOR_HSV2BGR).tolist()
-                        up = cv2.cvtColor(np.uint8([[self.hsvUpper]]), cv2.COLOR_HSV2BGR).tolist()
-                        cv2.rectangle(gui, crects[0], crects[1], low[0][0], -1)
-                        cv2.rectangle(gui, crects[2], crects[3], up[0][0], -1)
+                        cv2.rectangle(gui, colorRects[0], colorRects[1], self.hsvLower.bgr(), -1)
+                        cv2.rectangle(gui, colorRects[2], colorRects[3], self.hsvUpper.bgr(), -1)
                         cv2.imshow(CWIN, gui)
-                        for i in range(1, 5):
-                            cv2.line(
-                                display,
-                                self.corners[i - 1],
-                                self.corners[i % 4],
-                                (0, 255, 0),
-                                1
-                            )
+                        self.corners.lines(display, (0, 255, 0))
 
                     cv2.imshow(DWIN, display)
 
@@ -186,77 +258,68 @@ class Tracker:
                     if key in (ord("q"), 27):
                         break
 
-
         except KeyboardInterrupt:
             pass
 
-        if self.videoFlag:
-            vs.release()
-        else:
-            vs.stop()
-
+        vs.stop()
         cv2.destroyAllWindows()
 
-    def loadConfig(self):
+    def loadConfig(self, fileName, resolution):
+        data = {}
         try:
-            with open(CONFIG_FILE) as file:
+            with open(fileName) as file:
                 data = json.load(file)
-            self.hsvLower = tuple(int(v) for v in data.get('hsvLower', ())) or INITIAL_MASK_LOWER_HSV
-            self.hsvUpper = tuple(int(v) for v in data.get('hsvUpper', ())) or INITIAL_MASK_UPPER_HSV
-            self.minRadius = int(data.get('minRadius', INITIAL_MIN_BALL_RADIUS))
-            self.maxRadius = int(data.get('maxRadius', INITIAL_MAX_BALL_RADIUS))
-            self.maxFps = int(data.get('maxFps', INITIAL_MAX_FPS))
-            self.corners = list(tuple(int(v) for v in l) for l in data.get('corners', ())) or INITIAL_CORNERS
         except:
-            self.hsvLower = INITIAL_MASK_LOWER_HSV
-            self.hsvUpper = INITIAL_MASK_UPPER_HSV
-            self.minRadius = INITIAL_MIN_BALL_RADIUS
-            self.maxRadius = INITIAL_MAX_BALL_RADIUS
-            self.maxFps = INITIAL_MAX_FPS
-            self.corners = INITIAL_CORNERS
+            pass
+        self.hsvLower = HSVColor.read(data.get('hsvLower'), 0, 0, 0)
+        self.hsvUpper = HSVColor.read(data.get('hsvUpper'), 179, 255, 20)
+        self.minRadius = int(data.get('minRadius', 10))
+        self.maxRadius = int(data.get('maxRadius', 50))
+        self.maxFps = int(data.get('maxFps', 30))
+        self.corners = Quadrangle.read(
+            data.get('corners'),
+            (0, 0),
+            (resolution[0] - 1, 0),
+            (resolution[0] - 1, resolution[1] - 1),
+            (0, resolution[1] - 1)
+        )
         self.updateTransform()
 
-    def saveConfig(self):
+    def saveConfig(self, fileName):
         try:
-            with open(CONFIG_FILE, 'w') as file:
+            with open(fileName, 'w') as file:
                 json.dump({
-                    'hsvLower': self.hsvLower,
-                    'hsvUpper': self.hsvUpper,
+                    'hsvLower': self.hsvLower.hsv(),
+                    'hsvUpper': self.hsvUpper.hsv(),
                     'minRadius': self.minRadius,
                     'maxRadius': self.maxRadius,
                     'maxFps': self.maxFps,
-                    'corners': self.corners
+                    'corners': self.corners.points()
                 }, file)
         except:
             pass
 
     def saveConfigFromUi(self, ignore):
-        self.saveConfig()
+        self.saveConfig(CONFIG_FILE)
         self.save = 10
 
-    def setMaskRange(self, upFlag, key, value):
-        if upFlag:
-            self.hsvUpper = hsvAdjust(self.hsvUpper, key, value)
-        else:
-            self.hsvLower = hsvAdjust(self.hsvLower, key, value)
-
     def setLowerH(self, value):
-        self.setMaskRange(False, 'h', value)
+        self.hsvLower = self.hsvLower.setH(value)
 
     def setLowerS(self, value):
-        self.setMaskRange(False, 's', value)
+        self.hsvLower = self.hsvLower.setS(value)
 
     def setLowerV(self, value):
-        self.setMaskRange(False, 'v', value)
+        self.hsvLower = self.hsvLower.setV(value)
 
     def setUpperH(self, value):
-        self.setMaskRange(True, 'h', value)
+        self.hsvUpper = self.hsvUpper.setH(value)
 
     def setUpperS(self, value):
-        self.setMaskRange(True, 's', value)
+        self.hsvUpper = self.hsvUpper.setS(value)
 
     def setUpperV(self, value):
-        self.setMaskRange(True, 'v', value)
+        self.hsvUpper = self.hsvUpper.setV(value)
 
     def setMinRadius(self, value):
         self.minRadius = value
@@ -269,46 +332,23 @@ class Tracker:
 
     def setCorner(self, event, x, y, flags, parameters):
         if event == cv2.EVENT_LBUTTONUP:
-            center = (
-                sum(p[0] for p in self.corners) / 4,
-                sum(p[1] for p in self.corners) / 4
-            )
-            p = (x, y)
-            if x < center[0]:
-                if y < center[1]:
-                    self.corners[0] = p
-                else:
-                    self.corners[3] = p
-            else:
-                if y < center[1]:
-                    self.corners[1] = p
-                else:
-                    self.corners[2] = p
+            self.corners.moveCorner((x, y))
             self.updateTransform()
 
     def updateTransform(self):
-        self.bound = (
-            (min(p[0] for p in self.corners), min(p[1] for p in self.corners)),
-            (max(p[1] for p in self.corners), max(p[1] for p in self.corners))
-        )
+        self.cornersMask = np.zeros((RESOLUTION[1], RESOLUTION[0], 1), np.uint8)
+        self.corners.fill(self.cornersMask, (255))
         self.transform = cv2.getPerspectiveTransform(
-            np.array(self.corners, dtype='float32'),
+            np.array(self.corners.points(), dtype='float32'),
             np.array([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], dtype='float32')
         )
 
     def applyTransform(self, point):
-        out = cv2.perspectiveTransform(np.array([[point]], dtype='float32'), self.transform)
-        return out[0][0]
-
-
-def hsvAdjust(hsv, key, value):
-    if key == 'h':
-        return (value, hsv[1], hsv[2])
-    if key == 's':
-        return (hsv[0], value, hsv[2])
-    if key == 'v':
-        return (hsv[0], hsv[1], value)
-    return hsv
+        l = cv2.perspectiveTransform(
+            np.array([[point]], dtype='float32'),
+            self.transform
+        )
+        return l[0][0]
 
 
 def hasPiCamera():
@@ -320,8 +360,6 @@ def hasPiCamera():
 
 
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video",
-    help="path to the (optional) video file")
 ap.add_argument("-d", "--display",
     help="display frame including tracking data, default: yes")
 ap.add_argument("-c", "--calibrate",
@@ -333,7 +371,6 @@ ap.add_argument("-p", "--port",
 args = vars(ap.parse_args())
 
 tracker = Tracker(
-    args.get("video"),
     args.get("display") not in ("no", "false", "n", "0"),
     args.get("calibrate") in ("yes", "true", "y", "1"),
     args["host"],
