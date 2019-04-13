@@ -12,6 +12,7 @@ import json
 
 CONFIG_FILE = 'config.json'
 RESOLUTION = (320, 240)
+MAX_FPS = 40
 DISPLAY_LINE_LEN = 32
 DWIN = 'Tracking'
 CWIN = 'Calibrate'
@@ -160,9 +161,11 @@ class Tracker:
             cv2.createTrackbar('Up H', CWIN, self.hsvUpper.h, 179, self.setUpperH)
             cv2.createTrackbar('Up S', CWIN, self.hsvUpper.s, 255, self.setUpperS)
             cv2.createTrackbar('Up V', CWIN, self.hsvUpper.v, 255, self.setUpperV)
-            cv2.createTrackbar('Min R', CWIN, self.minRadius, 100, self.setMinRadius)
-            cv2.createTrackbar('Max R', CWIN, self.maxRadius, 100, self.setMaxRadius)
-            cv2.createTrackbar('Max FPS (restart required)', CWIN, self.maxFps, 120, self.setMaxFps)
+            mr = int(RESOLUTION[1] / 4)
+            cv2.createTrackbar('Min R', CWIN, self.minRadius, mr, self.setMinRadius)
+            cv2.createTrackbar('Max R', CWIN, self.maxRadius, mr, self.setMaxRadius)
+            cv2.createTrackbar('Max FPS (restart required)', CWIN, self.maxFps,
+                MAX_FPS, self.setMaxFps)
             cv2.createTrackbar('Save', CWIN, 0, 1, self.saveConfigFromUi)
             cv2.setMouseCallback(DWIN, self.setCorner)
 
